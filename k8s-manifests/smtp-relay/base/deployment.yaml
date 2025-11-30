@@ -1,0 +1,54 @@
+---
+# Simple SMTP relay for ArgoCD notifications
+# No authentication required for internal cluster use
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: smtp-relay
+  namespace: argocd
+  labels:
+    app: smtp-relay
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: smtp-relay
+  template:
+    metadata:
+      labels:
+        app: smtp-relay
+    spec:
+      containers:
+        - name: smtp
+          image: tianon/exim4:latest
+          ports:
+            - containerPort: 25
+              name: smtp
+          env:
+            # Allow relay from these networks
+            - name: EXIM_SMARTHOST
+              value: ""
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: smtp-relay
+  namespace: argocd
+  labels:
+    app: smtp-relay
+spec:
+  selector:
+    app: smtp-relay
+  ports:
+    - port: 25
+      targetPort: 25
+      protocol: TCP
+      name: smtp
+  type: ClusterIP

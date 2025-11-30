@@ -1,0 +1,50 @@
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nginx-image-validator
+  namespace: nginx-alb
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 2
+  template:
+    metadata:
+      name: nginx-image-validator
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: image-validator
+          image: docker:24-cli
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              echo "===== Image Validation Hook ====="
+              echo "Validating NGINX image: nginx:${NGINX_VERSION}"
+
+              # Pull the image to verify it exists
+              if docker pull nginx:${NGINX_VERSION}; then
+                echo "✓ Image nginx:${NGINX_VERSION} is valid and accessible"
+                exit 0
+              else
+                echo "✗ ERROR: Image nginx:${NGINX_VERSION} does not exist or is not accessible!"
+                echo "Please verify:"
+                echo "  1. The image tag exists at https://hub.docker.com/_/nginx/tags"
+                echo "  2. You have network connectivity to Docker Hub"
+                echo "  3. The tag is spelled correctly"
+                exit 1
+              fi
+          env:
+            - name: NGINX_VERSION
+              value: "1.29-alpine"  # This should match your deployment
+          volumeMounts:
+            - name: docker-sock
+              mountPath: /var/run/docker.sock
+      volumes:
+        - name: docker-sock
+          hostPath:
+            path: /var/run/docker.sock
+            type: Socket

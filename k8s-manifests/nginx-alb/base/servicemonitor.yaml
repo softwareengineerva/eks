@@ -1,0 +1,15 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: nginx-metrics
+  namespace: nginx-alb
+  labels:
+    app: nginx-alb
+spec:
+  selector:
+    matchLabels:
+      app: nginx-alb
+  endpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics

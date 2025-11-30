@@ -1,0 +1,49 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: nginx-alb
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    # Notification triggers - send to Slack channel via email
+    # Empty value means use service default recipient
+    notifications.argoproj.io/subscribe.on-deployed.slack-channel: jian-private-aaaaq6nbninfp6bphtpr3pwl7m@sap.org.slack.com
+    notifications.argoproj.io/subscribe.on-health-degraded.slack-channel: jian-private-aaaaq6nbninfp6bphtpr3pwl7m@sap.org.slack.com
+    notifications.argoproj.io/subscribe.on-sync-failed.slack-channel: jian-private-aaaaq6nbninfp6bphtpr3pwl7m@sap.org.slack.com
+    notifications.argoproj.io/subscribe.on-sync-running.slack-channel: jian-private-aaaaq6nbninfp6bphtpr3pwl7m@sap.org.slack.com
+    notifications.argoproj.io/subscribe.on-sync-succeeded.slack-channel: jian-private-aaaaq6nbninfp6bphtpr3pwl7m@sap.org.slack.com
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/softwareengineerva/eks.git
+    targetRevision: HEAD
+    path: k8s-manifests/nginx-alb/overlays/dev
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: nginx-alb
+
+  # Sync Policy
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - PruneLast=true  # Prune resources at the end of sync
+    retry:
+      limit: 5  # Retry failed syncs up to 5 times
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+
+  # Ignore differences in certain fields
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas  # Ignore HPA-managed replicas
+
+  # Health assessment
+  revisionHistoryLimit: 10

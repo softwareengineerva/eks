@@ -1,0 +1,72 @@
+---
+# Secure image validation hook (doesn't require Docker socket)
+# Uses crane to check image existence without pulling
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nginx-image-validator
+  namespace: nginx-alb
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 300  # Clean up after 5 minutes
+  template:
+    metadata:
+      name: nginx-image-validator
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        fsGroup: 65534
+      containers:
+        - name: image-validator
+          image: gcr.io/go-containerregistry/crane:latest
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              echo "===== Image Validation Hook ====="
+              IMAGE="nginx:${NGINX_VERSION}"
+              echo "Validating image: ${IMAGE}"
+
+              # Use crane to check if image manifest exists
+              if crane manifest ${IMAGE} > /dev/null 2>&1; then
+                echo "✓ Image ${IMAGE} is valid and accessible"
+
+                # Get image digest for verification
+                DIGEST=$(crane digest ${IMAGE})
+                echo "  Digest: ${DIGEST}"
+
+                # Get platform info
+                echo "  Platform info:"
+                crane manifest ${IMAGE} | grep -E "architecture|os" || true
+
+                exit 0
+              else
+                echo "✗ ERROR: Image ${IMAGE} does not exist or is not accessible!"
+                echo ""
+                echo "Troubleshooting steps:"
+                echo "  1. Check if the tag exists: https://hub.docker.com/_/nginx/tags"
+                echo "  2. Verify tag format (expected format: X.YZ-alpine or X.YZ)"
+                echo "  3. Current value: NGINX_VERSION=${NGINX_VERSION}"
+                echo ""
+                echo "Recent valid tags:"
+                echo "  - 1.27-alpine"
+                echo "  - 1.26-alpine"
+                echo "  - 1.25-alpine"
+                exit 1
+              fi
+          env:
+            - name: NGINX_VERSION
+              value: "1.29-alpine"  # This should match your deployment-patch.yaml
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "100m"
+            limits:
+              memory: "128Mi"
+              cpu: "200m"

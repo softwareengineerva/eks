@@ -1,0 +1,239 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-notifications-cm
+  namespace: argocd
+data:
+  # Email service using in-cluster SMTP relay (no authentication required)
+  service.email.slack-channel: |
+    host: smtp-relay.argocd.svc.cluster.local
+    port: 25
+    from: argocd-notifications@cluster.local
+    to: jian-private-aaaaq6nbninfp6bphtpr3pwl7m@sap.org.slack.com
+    insecure_skip_verify: true
+
+  # Optional: Slack webhook service (if you prefer webhooks)
+  # service.slack: |
+  #   token: $slack-token
+
+  # Trigger: Application Degraded (Image Pull Failures)
+  trigger.on-health-degraded: |
+    - description: Application has degraded
+      send:
+      - app-health-degraded
+      when: app.status.health.status == 'Degraded'
+
+  # Trigger: Sync Failed
+  trigger.on-sync-failed: |
+    - description: Application syncing has failed
+      send:
+      - app-sync-failed
+      when: app.status.operationState.phase in ['Error', 'Failed']
+
+  # Trigger: Sync Running
+  trigger.on-sync-running: |
+    - description: Application is being synced
+      send:
+      - app-sync-running
+      when: app.status.operationState.phase in ['Running']
+
+  # Trigger: Sync Succeeded
+  trigger.on-sync-succeeded: |
+    - description: Application syncing has succeeded
+      send:
+      - app-sync-succeeded
+      when: app.status.operationState.phase in ['Succeeded']
+
+  # Trigger: Application Deployed
+  trigger.on-deployed: |
+    - description: Application is synced and healthy
+      send:
+      - app-deployed
+      when: app.status.operationState.phase in ['Succeeded'] and app.status.health.status == 'Healthy'
+
+  # Template: Health Degraded
+  template.app-health-degraded: |
+    email:
+      subject: "🔴 ArgoCD Alert: {{.app.metadata.name}} is DEGRADED"
+    message: |
+      Application {{.app.metadata.name}} is DEGRADED!
+      Application details: {{.context.argocdUrl}}/applications/{{.app.metadata.name}}
+
+      Health Status: {{.app.status.health.status}}
+      Sync Status: {{.app.status.sync.status}}
+      Namespace: {{.app.spec.destination.namespace}}
+
+      Possible Issues:
+      - Image pull failures (invalid image tag)
+      - Resource limits exceeded
+      - Configuration errors
+
+      Check pods status:
+      kubectl get pods -n {{.app.spec.destination.namespace}}
+      kubectl describe pod <pod-name> -n {{.app.spec.destination.namespace}}
+    slack:
+      attachments: |
+        [{
+          "title": "{{ .app.metadata.name}}",
+          "title_link":"{{.context.argocdUrl}}/applications/{{.app.metadata.name}}",
+          "color": "#ff0000",
+          "fields": [
+          {
+            "title": "Sync Status",
+            "value": "{{.app.status.sync.status}}",
+            "short": true
+          },
+          {
+            "title": "Health Status",
+            "value": "{{.app.status.health.status}}",
+            "short": true
+          },
+          {
+            "title": "Repository",
+            "value": "{{.app.spec.source.repoURL}}",
+            "short": true
+          },
+          {
+            "title": "Namespace",
+            "value": "{{.app.spec.destination.namespace}}",
+            "short": true
+          }
+          {{range $index, $c := .app.status.conditions}}
+          {{if not $index}},{{end}}
+          {{if $index}},{{end}}
+          {
+            "title": "{{$c.type}}",
+            "value": "{{$c.message}}",
+            "short": false
+          }
+          {{end}}
+          ]
+        }]
+
+  # Template: Sync Failed
+  template.app-sync-failed: |
+    email:
+      subject: "⚠️ ArgoCD Alert: {{.app.metadata.name}} sync FAILED"
+    message: |
+      Application {{.app.metadata.name}} sync FAILED!
+      Application details: {{.context.argocdUrl}}/applications/{{.app.metadata.name}}
+
+      Error: {{.app.status.operationState.message}}
+      Repository: {{.app.spec.source.repoURL}}
+    slack:
+      attachments: |
+        [{
+          "title": "{{ .app.metadata.name}}",
+          "title_link":"{{.context.argocdUrl}}/applications/{{.app.metadata.name}}",
+          "color": "#E96D76",
+          "fields": [
+          {
+            "title": "Sync Status",
+            "value": "{{.app.status.sync.status}}",
+            "short": true
+          },
+          {
+            "title": "Repository",
+            "value": "{{.app.spec.source.repoURL}}",
+            "short": true
+          }
+          ]
+        }]
+
+  # Template: Sync Running
+  template.app-sync-running: |
+    email:
+      subject: "🔄 ArgoCD: {{.app.metadata.name}} is syncing"
+    message: |
+      Application {{.app.metadata.name}} is syncing...
+      Application details: {{.context.argocdUrl}}/applications/{{.app.metadata.name}}
+      Repository: {{.app.spec.source.repoURL}}
+    slack:
+      attachments: |
+        [{
+          "title": "{{ .app.metadata.name}}",
+          "title_link":"{{.context.argocdUrl}}/applications/{{.app.metadata.name}}",
+          "color": "#0DADEA",
+          "fields": [
+          {
+            "title": "Sync Status",
+            "value": "{{.app.status.sync.status}}",
+            "short": true
+          },
+          {
+            "title": "Repository",
+            "value": "{{.app.spec.source.repoURL}}",
+            "short": true
+          }
+          ]
+        }]
+
+  # Template: Sync Succeeded
+  template.app-sync-succeeded: |
+    email:
+      subject: "✅ ArgoCD: {{.app.metadata.name}} sync succeeded"
+    message: |
+      Application {{.app.metadata.name}} sync succeeded!
+      Application details: {{.context.argocdUrl}}/applications/{{.app.metadata.name}}
+
+      Sync Status: {{.app.status.sync.status}}
+      Health Status: {{.app.status.health.status}}
+    slack:
+      attachments: |
+        [{
+          "title": "{{ .app.metadata.name}}",
+          "title_link":"{{.context.argocdUrl}}/applications/{{.app.metadata.name}}",
+          "color": "#18be52",
+          "fields": [
+          {
+            "title": "Sync Status",
+            "value": "{{.app.status.sync.status}}",
+            "short": true
+          },
+          {
+            "title": "Health Status",
+            "value": "{{.app.status.health.status}}",
+            "short": true
+          }
+          ]
+        }]
+
+  # Template: Application Deployed
+  template.app-deployed: |
+    email:
+      subject: "🚀 ArgoCD: {{.app.metadata.name}} is deployed and healthy"
+    message: |
+      Application {{.app.metadata.name}} is now running and healthy!
+      Application details: {{.context.argocdUrl}}/applications/{{.app.metadata.name}}
+
+      Sync Status: {{.app.status.sync.status}}
+      Health Status: {{.app.status.health.status}}
+      Revision: {{.app.status.sync.revision}}
+    slack:
+      attachments: |
+        [{
+          "title": "{{ .app.metadata.name}}",
+          "title_link":"{{.context.argocdUrl}}/applications/{{.app.metadata.name}}",
+          "color": "#18be52",
+          "fields": [
+          {
+            "title": "Sync Status",
+            "value": "{{.app.status.sync.status}}",
+            "short": true
+          },
+          {
+            "title": "Health Status",
+            "value": "{{.app.status.health.status}}",
+            "short": true
+          },
+          {
+            "title": "Revision",
+            "value": "{{.app.status.sync.revision}}",
+            "short": true
+          }
+          ]
+        }]
+
+  # Context for ArgoCD URL
+  context: |
+    argocdUrl: https://argocd.example.com

@@ -1,0 +1,167 @@
+## Prometheus + Grafana Stack Configuration
+## Deploy this via ArgoCD using Helm
+
+## Prometheus Configuration
+prometheus:
+  prometheusSpec:
+    retention: 30d
+    retentionSize: "45GB"
+
+    # Use gp3 encrypted storage
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: gp3
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 50Gi
+
+    # Resource requests and limits
+    resources:
+      requests:
+        cpu: 500m
+        memory: 2Gi
+      limits:
+        cpu: 2000m
+        memory: 4Gi
+
+    # Enable service monitors for all namespaces
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+
+    # Linkerd metrics scraping
+    additionalScrapeConfigs:
+      - job_name: 'linkerd-controller'
+        kubernetes_sd_configs:
+        - role: pod
+          namespaces:
+            names:
+            - 'linkerd'
+            - 'linkerd-viz'
+        relabel_configs:
+        - source_labels:
+          - __meta_kubernetes_pod_container_port_name
+          action: keep
+          regex: admin-http
+        - source_labels: [__meta_kubernetes_pod_container_name]
+          action: replace
+          target_label: component
+
+      - job_name: 'linkerd-proxy'
+        kubernetes_sd_configs:
+        - role: pod
+        relabel_configs:
+        - source_labels:
+          - __meta_kubernetes_pod_container_name
+          - __meta_kubernetes_pod_container_port_name
+          action: keep
+          regex: ^linkerd-proxy;linkerd-admin$
+        - source_labels: [__meta_kubernetes_namespace]
+          action: replace
+          target_label: namespace
+        - source_labels: [__meta_kubernetes_pod_name]
+          action: replace
+          target_label: pod
+        - source_labels: [__meta_kubernetes_pod_label_linkerd_io_proxy_job]
+          action: replace
+          target_label: k8s_job
+
+## Grafana Configuration
+grafana:
+  enabled: true
+
+  # Admin credentials (change in production!)
+  adminPassword: "admin"
+
+  # Persistence
+  persistence:
+    enabled: true
+    storageClassName: gp3
+    size: 10Gi
+
+  # Resources
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  # Ingress (disabled - use port-forward or LoadBalancer)
+  ingress:
+    enabled: false
+
+  # Service type
+  service:
+    type: ClusterIP
+    port: 80
+
+  # Datasources
+  datasources:
+    datasources.yaml:
+      apiVersion: 1
+      datasources:
+        - name: Prometheus
+          type: prometheus
+          uid: PBFA97CFB590B2093
+          url: http://prometheus-stack-kube-prom-prometheus:9090
+          access: proxy
+          isDefault: true
+
+  # Default dashboards
+  defaultDashboardsEnabled: true
+
+  # Disable default datasource provisioning to avoid conflicts
+  sidecar:
+    datasources:
+      defaultDatasourceEnabled: false
+
+  # Additional dashboards
+  dashboardProviders:
+    dashboardproviders.yaml:
+      apiVersion: 1
+      providers:
+        - name: 'default'
+          orgId: 1
+          folder: ''
+          type: file
+          disableDeletion: false
+          editable: true
+          options:
+            path: /var/lib/grafana/dashboards/default
+
+## AlertManager Configuration
+alertmanager:
+  enabled: true
+
+  alertmanagerSpec:
+    storage:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: gp3
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 10Gi
+
+## Kube State Metrics
+kubeStateMetrics:
+  enabled: true
+
+## Node Exporter
+nodeExporter:
+  enabled: true
+
+## Prometheus Operator
+prometheusOperator:
+  enabled: true
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi

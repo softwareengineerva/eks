@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: backend-api
+  labels:
+    name: backend-api
+    env: dev
+  annotations:
+    linkerd.io/inject: enabled  # Enable Linkerd sidecar injection

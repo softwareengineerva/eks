@@ -1,0 +1,98 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: linkerd
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    chart: linkerd-control-plane
+    repoURL: https://helm.linkerd.io/stable
+    targetRevision: 1.16.11
+    helm:
+      valuesObject:
+        # Identity configuration - use external certificates
+        identity:
+          issuer:
+            scheme: kubernetes.io/tls
+            tls:
+              crtPEM: |
+                -----BEGIN CERTIFICATE-----
+                MIIBsTCCAVigAwIBAgIQCvUOvnP41JkDCNWnOsCaNTAKBggqhkjOPQQDAjAlMSMw
+                IQYDVQQDExpyb290LmxpbmtlcmQuY2x1c3Rlci5sb2NhbDAeFw0yNTEyMDExMzMy
+                NDNaFw0yNjEyMDExMzMyNDNaMCkxJzAlBgNVBAMTHmlkZW50aXR5LmxpbmtlcmQu
+                Y2x1c3Rlci5sb2NhbDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABM71WWMNIX7T
+                caDMEHZ4to9oF0EuOlqLkjimFS8HMHsHJh8s+RyND7jPB9RN7tCLwpGzyJ5zDYzq
+                bPanOnmpSLajZjBkMA4GA1UdDwEB/wQEAwIBBjASBgNVHRMBAf8ECDAGAQH/AgEA
+                MB0GA1UdDgQWBBR7MMbFOH/JhziQFJPe40hOQGRnoTAfBgNVHSMEGDAWgBR7Bfcx
+                ieoflMUZYm6F//WJzg3lijAKBggqhkjOPQQDAgNHADBEAiBcrw52jFuWyMp+twCL
+                v/hvLavuZx1K0D06vqnmDX6zHgIgC0+FK27+YIx6F7QAivfX5MHICCY3l+lpOGzi
+                kCnLuDc=
+                -----END CERTIFICATE-----
+              keyPEM: |
+                -----BEGIN EC PRIVATE KEY-----
+                MHcCAQEEIB54M4+ECqaeYmgM7DRO/AqMJlPjW40ohWwbjVDuQXX5oAoGCCqGSM49
+                AwEHoUQDQgAEzvVZYw0hftNxoMwQdni2j2gXQS46WouSOKYVLwcwewcmHyz5HI0P
+                uM8H1E3u0IvCkbPInnMNjOps9qc6ealItg==
+                -----END EC PRIVATE KEY-----
+
+        # Identity trust anchor
+        identityTrustAnchorsPEM: |
+          -----BEGIN CERTIFICATE-----
+          MIIBjjCCATOgAwIBAgIQB985TquLwoDwtEPRHZCWvTAKBggqhkjOPQQDAjAlMSMw
+          IQYDVQQDExpyb290LmxpbmtlcmQuY2x1c3Rlci5sb2NhbDAeFw0yNTEyMDExMzMy
+          MzJaFw0zNTExMjkxMzMyMzJaMCUxIzAhBgNVBAMTGnJvb3QubGlua2VyZC5jbHVz
+          dGVyLmxvY2FsMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE9P1cbOV5IWwMHai/
+          kS0I+uyqXaBY3avInCWFKldyu4iFwN5pm3Qi6Eh368h4UfGBQH60DXPHoNCfGfM+
+          Dm9UbqNFMEMwDgYDVR0PAQH/BAQDAgEGMBIGA1UdEwEB/wQIMAYBAf8CAQEwHQYD
+          VR0OBBYEFHsF9zGJ6h+UxRliboX/9YnODeWKMAoGCCqGSM49BAMCA0kAMEYCIQDg
+          jaPENqlAhKqYPafDX9yJHNMTUawI26ZHHconhc8QjQIhAIZ6zzD34sgbiYWUZxVx
+          9NqFCV5Ey71/LQ51sghp/S83
+          -----END CERTIFICATE-----
+
+        # Control plane HA
+        controllerReplicas: 2
+        controllerResources:
+          cpu:
+            limit: "500m"
+            request: "100m"
+          memory:
+            limit: "512Mi"
+            request: "128Mi"
+
+        # Proxy defaults
+        proxy:
+          resources:
+            cpu:
+              limit: "500m"
+              request: "100m"
+            memory:
+              limit: "256Mi"
+              request: "64Mi"
+
+        # Prometheus integration
+        prometheusUrl: http://prometheus-stack-kube-prom-prometheus.monitoring.svc.cluster.local:9090
+
+        # Dashboard
+        dashboard:
+          replicas: 1
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: linkerd
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m

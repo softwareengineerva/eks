@@ -1,0 +1,362 @@
+# GitHub Actions Workflow for EKS Terraform Deployment
+# Author: Jian Ouyang (jian.ouyang@sapns2.com)
+#
+# This workflow handles infrastructure deployment using Terraform
+# Workflow is triggered on pushes to main and pull requests
+
+name: Terraform Deploy
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'terraform/**'
+      - '.github/workflows/terraform-deploy.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'terraform/**'
+      - '.github/workflows/terraform-deploy.yml'
+  workflow_dispatch:  # Allow manual trigger
+
+env:
+  TF_VERSION: "1.6.0"
+  AWS_REGION: "us-east-1"
+  TF_ROOT: "./terraform"
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+
+# Use concurrency to prevent multiple deployments at once
+concurrency:
+  group: terraform-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ========================================
+  # JOB 1: PRE-COMMIT CHECKS
+  # ========================================
+  pre-commit:
+    name: Pre-commit Checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install pre-commit
+        run: pip install pre-commit
+
+      - name: Run pre-commit
+        run: pre-commit run --all-files
+        continue-on-error: true  # Don't block pipeline if formatting is off
+
+  # ========================================
+  # JOB 2: TERRAFORM VALIDATION
+  # ========================================
+  terraform-validate:
+    name: Terraform Validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Format Check
+        working-directory: ${{ env.TF_ROOT }}
+        run: terraform fmt -check -recursive
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_ROOT }}
+        run: terraform init -backend=false
+
+      - name: Terraform Validate
+        working-directory: ${{ env.TF_ROOT }}
+        run: terraform validate
+
+  # ========================================
+  # JOB 3: KUSTOMIZE VALIDATION
+  # ========================================
+  kustomize-validate:
+    name: Kustomize Validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Kustomize
+        uses: imranismail/setup-kustomize@v2
+        with:
+          kustomize-version: "5.0.0"
+
+      - name: Validate Kustomize Manifests
+        run: |
+          echo "Validating Kustomize manifests..."
+
+          # Validate overlays
+          for overlay in k8s-manifests/*/overlays/dev; do
+            if [ -f "$overlay/kustomization.yaml" ]; then
+              echo "Building: $overlay"
+              kustomize build $overlay > /dev/null
+            fi
+          done
+
+          # Validate base
+          for base in k8s-manifests/*/base; do
+            if [ -f "$base/kustomization.yaml" ]; then
+              echo "Building: $base"
+              kustomize build $base > /dev/null
+            fi
+          done
+
+          # Validate root kustomization files
+          for kustomize_file in k8s-manifests/*/kustomization.yaml; do
+            if [ -f "$kustomize_file" ]; then
+              dir=$(dirname "$kustomize_file")
+              echo "Building: $dir"
+              kustomize build $dir > /dev/null
+            fi
+          done
+
+          echo "✅ All Kustomize manifests are valid"
+
+  # ========================================
+  # JOB 4: TERRAFORM PLAN
+  # ========================================
+  terraform-plan:
+    name: Terraform Plan
+    runs-on: ubuntu-latest
+    needs: [terraform-validate]
+    permissions:
+      contents: read
+      pull-requests: write  # For PR comments
+    outputs:
+      plan_exitcode: ${{ steps.plan.outputs.exitcode }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Unset GCP Credentials
+        run: |
+          unset GOOGLE_APPLICATION_CREDENTIALS
+          unset GOOGLE_PROJECT
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_ROOT }}
+        run: terraform init
+
+      - name: Terraform Plan
+        id: plan
+        working-directory: ${{ env.TF_ROOT }}
+        run: |
+          terraform plan -out=tfplan -detailed-exitcode || echo "exitcode=$?" >> $GITHUB_OUTPUT
+          terraform show -no-color tfplan > plan.txt
+        continue-on-error: true
+
+      - name: Upload Plan Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan
+          path: |
+            ${{ env.TF_ROOT }}/tfplan
+            ${{ env.TF_ROOT }}/plan.txt
+          retention-days: 7
+
+      - name: Comment PR with Plan
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('${{ env.TF_ROOT }}/plan.txt', 'utf8');
+            const output = `#### Terraform Plan 📖
+            <details><summary>Show Plan</summary>
+
+            \`\`\`terraform
+            ${plan}
+            \`\`\`
+
+            </details>
+
+            *Pushed by: @${{ github.actor }}, Action: \`${{ github.event_name }}\`*`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+
+  # ========================================
+  # JOB 5: COST ESTIMATION (OPTIONAL)
+  # ========================================
+  cost-estimate:
+    name: Cost Estimation
+    runs-on: ubuntu-latest
+    needs: [terraform-plan]
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Infracost
+        uses: infracost/actions/setup@v3
+        with:
+          api-key: ${{ secrets.INFRACOST_API_KEY }}
+        continue-on-error: true
+
+      - name: Download Plan
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan
+          path: ${{ env.TF_ROOT }}
+
+      - name: Generate Infracost JSON
+        run: |
+          cd ${{ env.TF_ROOT }}
+          infracost breakdown --path . \
+            --format json \
+            --out-file /tmp/infracost.json
+        continue-on-error: true
+
+      - name: Post Infracost comment
+        uses: infracost/actions/comment@v3
+        with:
+          path: /tmp/infracost.json
+          behavior: update
+        continue-on-error: true
+
+  # ========================================
+  # JOB 6: TERRAFORM APPLY
+  # ========================================
+  terraform-apply:
+    name: Terraform Apply
+    runs-on: ubuntu-latest
+    needs: [terraform-plan, kustomize-validate]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment:
+      name: production
+      url: https://console.aws.amazon.com/eks/home?region=${{ env.AWS_REGION }}
+    permissions:
+      contents: read
+      id-token: write  # For OIDC
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Download Plan
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan
+          path: ${{ env.TF_ROOT }}
+
+      - name: Unset GCP Credentials
+        run: |
+          unset GOOGLE_APPLICATION_CREDENTIALS
+          unset GOOGLE_PROJECT
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_ROOT }}
+        run: terraform init
+
+      - name: Terraform Apply
+        working-directory: ${{ env.TF_ROOT }}
+        run: terraform apply -auto-approve tfplan
+
+      - name: Export Terraform Outputs
+        working-directory: ${{ env.TF_ROOT }}
+        run: terraform output -json > outputs.json
+
+      - name: Upload Outputs Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-outputs
+          path: ${{ env.TF_ROOT }}/outputs.json
+          retention-days: 30
+
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name concur-test-eks
+
+      - name: Verify Cluster Access
+        run: |
+          kubectl cluster-info
+          kubectl get nodes
+
+  # ========================================
+  # JOB 7: TERRAFORM DESTROY (MANUAL)
+  # ========================================
+  terraform-destroy:
+    name: Terraform Destroy
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    environment:
+      name: production-destroy
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Unset GCP Credentials
+        run: |
+          unset GOOGLE_APPLICATION_CREDENTIALS
+          unset GOOGLE_PROJECT
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_ROOT }}
+        run: terraform init
+
+      - name: Terraform Destroy
+        working-directory: ${{ env.TF_ROOT }}
+        run: terraform destroy -auto-approve

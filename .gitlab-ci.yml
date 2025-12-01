@@ -1,0 +1,419 @@
+# GitLab CI/CD Pipeline for EKS Deployment
+# Author: Jian Ouyang (jian.ouyang@sapns2.com)
+#
+# Pipeline Stages:
+# 1. validate   - Terraform validation and formatting checks
+# 2. plan       - Terraform plan (what will change)
+# 3. apply      - Terraform apply (deploy infrastructure) - MANUAL for main branch
+# 4. configure  - Configure kubectl access to EKS cluster
+# 5. deploy     - Deploy ArgoCD applications
+
+variables:
+  # Terraform configuration
+  TF_ROOT: ${CI_PROJECT_DIR}/terraform
+  TF_VERSION: "1.6.0"
+
+  # AWS configuration
+  AWS_DEFAULT_REGION: "us-east-1"
+  EKS_CLUSTER_NAME: "concur-test-eks"
+
+  # Pipeline behavior
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+
+  # Artifact retention
+  PLAN_ARTIFACT_DAYS: "7"
+
+# Define stages
+stages:
+  - validate
+  - plan
+  - apply
+  - configure
+  - deploy
+
+# Cache Terraform plugins between jobs
+cache:
+  key: "${CI_COMMIT_REF_SLUG}"
+  paths:
+    - ${TF_ROOT}/.terraform/
+    - ${TF_ROOT}/.terraform.lock.hcl
+
+# ========================================
+# STAGE 1: VALIDATE
+# ========================================
+
+# Pre-commit checks (Terraform format, YAML lint)
+pre-commit:
+  stage: validate
+  image: python:3.11-alpine
+  before_script:
+    - apk add --no-cache git
+    - pip install pre-commit
+  script:
+    - pre-commit run --all-files
+  allow_failure: true  # Don't block pipeline if formatting is off
+  only:
+    - merge_requests
+    - main
+
+# Terraform validation
+terraform:validate:
+  stage: validate
+  image:
+    name: hashicorp/terraform:${TF_VERSION}
+    entrypoint: [""]
+  before_script:
+    - cd ${TF_ROOT}
+  script:
+    - terraform --version
+    - terraform init -backend=false  # Don't access remote state for validation
+    - terraform validate
+    - terraform fmt -check -recursive
+  only:
+    - merge_requests
+    - main
+
+# Validate Kubernetes manifests with kustomize
+kustomize:validate:
+  stage: validate
+  image:
+    name: k8s.gcr.io/kustomize/kustomize:v5.0.0
+    entrypoint: [""]
+  script:
+    - |
+      echo "Validating Kustomize manifests..."
+      for overlay in k8s-manifests/*/overlays/dev; do
+        if [ -f "$overlay/kustomization.yaml" ]; then
+          echo "Building: $overlay"
+          kustomize build $overlay > /dev/null
+        fi
+      done
+
+      for base in k8s-manifests/*/base; do
+        if [ -f "$base/kustomization.yaml" ]; then
+          echo "Building: $base"
+          kustomize build $base > /dev/null
+        fi
+      done
+
+      for kustomize_file in k8s-manifests/*/kustomization.yaml; do
+        if [ -f "$kustomize_file" ]; then
+          dir=$(dirname "$kustomize_file")
+          echo "Building: $dir"
+          kustomize build $dir > /dev/null
+        fi
+      done
+  only:
+    - merge_requests
+    - main
+
+# ========================================
+# STAGE 2: PLAN
+# ========================================
+
+terraform:plan:
+  stage: plan
+  image:
+    name: hashicorp/terraform:${TF_VERSION}
+    entrypoint: [""]
+  before_script:
+    - cd ${TF_ROOT}
+  script:
+    - terraform --version
+    - terraform init
+    - terraform plan -out=tfplan
+    - terraform show -no-color tfplan > plan.txt
+  artifacts:
+    name: "terraform-plan-${CI_COMMIT_REF_SLUG}"
+    paths:
+      - ${TF_ROOT}/tfplan
+      - ${TF_ROOT}/plan.txt
+    expire_in: ${PLAN_ARTIFACT_DAYS} days
+    reports:
+      terraform: ${TF_ROOT}/plan.txt
+  dependencies:
+    - terraform:validate
+  only:
+    - merge_requests
+    - main
+
+# ========================================
+# STAGE 3: APPLY
+# ========================================
+
+terraform:apply:
+  stage: apply
+  image:
+    name: hashicorp/terraform:${TF_VERSION}
+    entrypoint: [""]
+  before_script:
+    - cd ${TF_ROOT}
+  script:
+    - terraform --version
+    - terraform init
+    - terraform apply -auto-approve tfplan
+    - terraform output -json > outputs.json
+  artifacts:
+    name: "terraform-outputs-${CI_COMMIT_REF_SLUG}"
+    paths:
+      - ${TF_ROOT}/outputs.json
+    expire_in: 30 days
+  dependencies:
+    - terraform:plan
+  when: manual  # Require manual approval
+  only:
+    - main  # Only allow apply on main branch
+  environment:
+    name: production
+    action: prepare
+
+# ========================================
+# STAGE 4: CONFIGURE KUBECTL
+# ========================================
+
+kubectl:configure:
+  stage: configure
+  image:
+    name: amazon/aws-cli:latest
+    entrypoint: [""]
+  before_script:
+    - yum install -y jq
+    - curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+    - chmod +x kubectl
+    - mv kubectl /usr/local/bin/
+  script:
+    - |
+      echo "Configuring kubectl access to EKS cluster..."
+      aws eks update-kubeconfig \
+        --region ${AWS_DEFAULT_REGION} \
+        --name ${EKS_CLUSTER_NAME}
+
+      echo "Verifying cluster access..."
+      kubectl cluster-info
+      kubectl get nodes
+
+      echo "Checking ArgoCD installation..."
+      if kubectl get namespace argocd &> /dev/null; then
+        echo "✅ ArgoCD namespace exists"
+        kubectl get pods -n argocd
+      else
+        echo "⚠️  ArgoCD not installed yet - will be installed by Terraform"
+      fi
+  dependencies:
+    - terraform:apply
+  only:
+    - main
+  environment:
+    name: production
+    action: verify
+
+# ========================================
+# STAGE 5: DEPLOY ARGOCD APPLICATIONS
+# ========================================
+
+# Deploy all ArgoCD applications
+argocd:deploy-all:
+  stage: deploy
+  image:
+    name: amazon/aws-cli:latest
+    entrypoint: [""]
+  before_script:
+    - yum install -y jq git
+    - curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+    - chmod +x kubectl
+    - mv kubectl /usr/local/bin/
+    - aws eks update-kubeconfig --region ${AWS_DEFAULT_REGION} --name ${EKS_CLUSTER_NAME}
+  script:
+    - |
+      echo "Deploying ArgoCD Applications..."
+
+      # Wait for ArgoCD to be ready
+      echo "Waiting for ArgoCD to be ready..."
+      kubectl wait --for=condition=Ready pod -l app.kubernetes.io/name=argocd-server -n argocd --timeout=300s || true
+
+      # Deploy each ArgoCD application
+      for app in argocd-apps/*.yaml; do
+        echo "Deploying: $app"
+        kubectl apply -f $app
+      done
+
+      echo ""
+      echo "Waiting for applications to sync..."
+      sleep 30
+
+      echo ""
+      echo "ArgoCD Applications Status:"
+      kubectl get applications -n argocd -o wide
+
+      echo ""
+      echo "Application Health Summary:"
+      kubectl get applications -n argocd -o json | \
+        jq -r '.items[] | "\(.metadata.name): \(.status.sync.status) / \(.status.health.status)"'
+  dependencies:
+    - kubectl:configure
+  when: manual  # Require manual approval
+  only:
+    - main
+  environment:
+    name: production
+    action: start
+
+# Deploy individual applications (can be triggered manually)
+.argocd:deploy-app:
+  stage: deploy
+  image:
+    name: amazon/aws-cli:latest
+    entrypoint: [""]
+  before_script:
+    - yum install -y jq
+    - curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+    - chmod +x kubectl
+    - mv kubectl /usr/local/bin/
+    - aws eks update-kubeconfig --region ${AWS_DEFAULT_REGION} --name ${EKS_CLUSTER_NAME}
+  script:
+    - |
+      echo "Deploying ArgoCD Application: ${APP_NAME}"
+      kubectl apply -f argocd-apps/${APP_NAME}-app.yaml
+
+      echo "Waiting for sync..."
+      sleep 10
+
+      echo "Application Status:"
+      kubectl get application ${APP_NAME} -n argocd -o yaml
+  when: manual
+  only:
+    - main
+
+# Individual app deployment jobs
+argocd:deploy-nginx:
+  extends: .argocd:deploy-app
+  variables:
+    APP_NAME: "nginx-alb"
+
+argocd:deploy-postgres:
+  extends: .argocd:deploy-app
+  variables:
+    APP_NAME: "postgres"
+
+argocd:deploy-redis:
+  extends: .argocd:deploy-app
+  variables:
+    APP_NAME: "redis"
+
+argocd:deploy-monitoring:
+  extends: .argocd:deploy-app
+  variables:
+    APP_NAME: "monitoring"
+
+argocd:deploy-cluster-autoscaler:
+  extends: .argocd:deploy-app
+  variables:
+    APP_NAME: "cluster-autoscaler"
+
+argocd:deploy-fluent-bit:
+  extends: .argocd:deploy-app
+  variables:
+    APP_NAME: "fluent-bit"
+
+argocd:deploy-secrets-demo:
+  extends: .argocd:deploy-app
+  variables:
+    APP_NAME: "secrets-demo"
+
+argocd:deploy-linkerd-crds:
+  extends: .argocd:deploy-app
+  variables:
+    APP_NAME: "linkerd-crds"
+
+argocd:deploy-linkerd:
+  extends: .argocd:deploy-app
+  variables:
+    APP_NAME: "linkerd"
+
+argocd:deploy-linkerd-viz:
+  extends: .argocd:deploy-app
+  variables:
+    APP_NAME: "linkerd-viz"
+
+# ========================================
+# ADDITIONAL JOBS
+# ========================================
+
+# Terraform destroy (manual, protected)
+terraform:destroy:
+  stage: apply
+  image:
+    name: hashicorp/terraform:${TF_VERSION}
+    entrypoint: [""]
+  before_script:
+    - cd ${TF_ROOT}
+    - unset GOOGLE_APPLICATION_CREDENTIALS GOOGLE_PROJECT
+  script:
+    - terraform --version
+    - terraform init
+    - terraform destroy -auto-approve
+  when: manual
+  only:
+    - main
+  environment:
+    name: production
+    action: stop
+
+# Sync all ArgoCD applications (force refresh)
+argocd:sync-all:
+  stage: deploy
+  image:
+    name: amazon/aws-cli:latest
+    entrypoint: [""]
+  before_script:
+    - yum install -y jq
+    - curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+    - chmod +x kubectl
+    - mv kubectl /usr/local/bin/
+    - aws eks update-kubeconfig --region ${AWS_DEFAULT_REGION} --name ${EKS_CLUSTER_NAME}
+  script:
+    - |
+      echo "Syncing all ArgoCD applications..."
+
+      # Get all application names
+      APPS=$(kubectl get applications -n argocd -o jsonpath='{.items[*].metadata.name}')
+
+      for app in $APPS; do
+        echo "Syncing: $app"
+        kubectl patch application $app -n argocd \
+          --type merge \
+          -p '{"operation":{"initiatedBy":{"username":"gitlab-ci"},"sync":{"syncStrategy":{"hook":{"force":true}}}}}'
+      done
+
+      echo ""
+      echo "Waiting for syncs to complete..."
+      sleep 30
+
+      echo ""
+      echo "Application Status:"
+      kubectl get applications -n argocd -o wide
+  when: manual
+  only:
+    - main
+    - merge_requests
+
+# Cost estimation (optional - requires infracost)
+cost:estimate:
+  stage: plan
+  image:
+    name: infracost/infracost:latest
+    entrypoint: [""]
+  script:
+    - |
+      cd ${TF_ROOT}
+      infracost breakdown \
+        --path . \
+        --format table \
+        --show-skipped
+  dependencies:
+    - terraform:plan
+  allow_failure: true
+  only:
+    - merge_requests
+    - main

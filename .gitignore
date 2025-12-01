@@ -1,0 +1,31 @@
+# Local .terraform directories
+**/.terraform/*
+
+# .tfstate files
+*.tfstate
+*.tfstate.*
+
+# Crash log files
+crash.log
+crash.*.log
+
+# Ignore override files as they are usually used to override resources locally
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Ignore CLI configuration files
+.terraformrc
+terraform.rc
+
+# Ignore lock info files
+.terraform.tfstate.lock.info
+
+# Ignore all markdown files
+*.md
+
+# Except README.md files
+!README.md
+!**/README.md
+!LINKERD-DEPLOYMENT.md

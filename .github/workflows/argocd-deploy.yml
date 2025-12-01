@@ -1,0 +1,311 @@
+# GitHub Actions Workflow for ArgoCD Application Deployment
+# Author: Jian Ouyang (jian.ouyang@sapns2.com)
+#
+# This workflow handles deployment of ArgoCD applications to EKS cluster
+
+name: ArgoCD Deploy
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'argocd-apps/**'
+      - 'k8s-manifests/**'
+      - '.github/workflows/argocd-deploy.yml'
+  workflow_dispatch:  # Allow manual trigger
+    inputs:
+      app_name:
+        description: 'Application to deploy (leave empty for all)'
+        required: false
+        type: choice
+        options:
+          - all
+          - nginx-alb
+          - postgres
+          - redis
+          - monitoring
+          - cluster-autoscaler
+          - fluent-bit
+          - secrets-demo
+          - smtp-relay
+          - linkerd-crds
+          - linkerd
+          - linkerd-viz
+      sync_only:
+        description: 'Only sync (do not apply)'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  AWS_REGION: "us-east-1"
+  EKS_CLUSTER_NAME: "concur-test-eks"
+  KUBECTL_VERSION: "1.31.0"
+
+jobs:
+  # ========================================
+  # JOB 1: DEPLOY ALL ARGOCD APPLICATIONS
+  # ========================================
+  deploy-all:
+    name: Deploy All ArgoCD Applications
+    runs-on: ubuntu-latest
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.event.inputs.app_name == 'all')
+    environment:
+      name: production
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: ${{ env.KUBECTL_VERSION }}
+
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name ${{ env.EKS_CLUSTER_NAME }}
+
+      - name: Wait for ArgoCD to be ready
+        run: |
+          echo "Waiting for ArgoCD to be ready..."
+          kubectl wait --for=condition=Ready pod \
+            -l app.kubernetes.io/name=argocd-server \
+            -n argocd \
+            --timeout=300s || echo "ArgoCD may not be fully ready yet"
+
+      - name: Deploy ArgoCD Applications
+        run: |
+          echo "Deploying all ArgoCD applications..."
+
+          for app in argocd-apps/*.yaml; do
+            echo "Applying: $app"
+            kubectl apply -f $app
+          done
+
+      - name: Wait for sync
+        run: |
+          echo "Waiting for applications to sync..."
+          sleep 30
+
+      - name: Check Application Status
+        run: |
+          echo ""
+          echo "==================================="
+          echo "ArgoCD Applications Status"
+          echo "==================================="
+          kubectl get applications -n argocd -o wide
+
+          echo ""
+          echo "==================================="
+          echo "Application Health Summary"
+          echo "==================================="
+          kubectl get applications -n argocd -o json | \
+            jq -r '.items[] | "\(.metadata.name): Sync=\(.status.sync.status) Health=\(.status.health.status)"'
+
+      - name: Generate Summary
+        run: |
+          {
+            echo "## ArgoCD Deployment Summary"
+            echo ""
+            echo "### Applications Deployed"
+            echo '```'
+            kubectl get applications -n argocd -o custom-columns=NAME:.metadata.name,SYNC:.status.sync.status,HEALTH:.status.health.status
+            echo '```'
+            echo ""
+            echo "### Cluster Info"
+            echo "- **Cluster:** ${{ env.EKS_CLUSTER_NAME }}"
+            echo "- **Region:** ${{ env.AWS_REGION }}"
+            echo "- **Deployed by:** @${{ github.actor }}"
+            echo "- **Commit:** ${{ github.sha }}"
+          } >> $GITHUB_STEP_SUMMARY
+
+  # ========================================
+  # JOB 2: DEPLOY INDIVIDUAL APPLICATION
+  # ========================================
+  deploy-app:
+    name: Deploy ${{ github.event.inputs.app_name }}
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.app_name != 'all' && github.event.inputs.app_name != ''
+    environment:
+      name: production
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: ${{ env.KUBECTL_VERSION }}
+
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name ${{ env.EKS_CLUSTER_NAME }}
+
+      - name: Deploy Application
+        run: |
+          APP_NAME="${{ github.event.inputs.app_name }}"
+          APP_FILE="argocd-apps/${APP_NAME}-app.yaml"
+
+          if [ ! -f "$APP_FILE" ]; then
+            echo "❌ Application file not found: $APP_FILE"
+            exit 1
+          fi
+
+          echo "Deploying ArgoCD Application: $APP_NAME"
+          kubectl apply -f $APP_FILE
+
+          echo "Waiting for sync..."
+          sleep 10
+
+          echo "Application Status:"
+          kubectl get application $APP_NAME -n argocd -o yaml
+
+  # ========================================
+  # JOB 3: SYNC ALL APPLICATIONS
+  # ========================================
+  sync-all:
+    name: Sync All ArgoCD Applications
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.sync_only == 'true'
+    environment:
+      name: production
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: ${{ env.KUBECTL_VERSION }}
+
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name ${{ env.EKS_CLUSTER_NAME }}
+
+      - name: Sync All Applications
+        run: |
+          echo "Syncing all ArgoCD applications..."
+
+          # Get all application names
+          APPS=$(kubectl get applications -n argocd -o jsonpath='{.items[*].metadata.name}')
+
+          for app in $APPS; do
+            echo "Syncing: $app"
+            kubectl patch application $app -n argocd \
+              --type merge \
+              -p '{"operation":{"initiatedBy":{"username":"github-actions"},"sync":{"syncStrategy":{"hook":{"force":true}}}}}'
+          done
+
+          echo ""
+          echo "Waiting for syncs to complete..."
+          sleep 30
+
+          echo ""
+          echo "Application Status:"
+          kubectl get applications -n argocd -o wide
+
+  # ========================================
+  # JOB 4: VERIFY ARGOCD HEALTH
+  # ========================================
+  verify-health:
+    name: Verify ArgoCD Health
+    runs-on: ubuntu-latest
+    needs: [deploy-all]
+    if: always()
+    permissions:
+      contents: read
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: ${{ env.KUBECTL_VERSION }}
+
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name ${{ env.EKS_CLUSTER_NAME }}
+
+      - name: Check Application Health
+        run: |
+          echo "Checking application health..."
+
+          UNHEALTHY=0
+
+          # Check each application
+          for app in $(kubectl get applications -n argocd -o jsonpath='{.items[*].metadata.name}'); do
+            HEALTH=$(kubectl get application $app -n argocd -o jsonpath='{.status.health.status}')
+            SYNC=$(kubectl get application $app -n argocd -o jsonpath='{.status.sync.status}')
+
+            echo "$app: Sync=$SYNC Health=$HEALTH"
+
+            if [ "$HEALTH" != "Healthy" ]; then
+              UNHEALTHY=$((UNHEALTHY + 1))
+              echo "⚠️  $app is not healthy"
+            fi
+          done
+
+          if [ $UNHEALTHY -gt 0 ]; then
+            echo ""
+            echo "❌ $UNHEALTHY application(s) are not healthy"
+            exit 1
+          else
+            echo ""
+            echo "✅ All applications are healthy"
+          fi
+
+      - name: Check Pod Status
+        if: always()
+        run: |
+          echo ""
+          echo "==================================="
+          echo "Pod Status Across All Namespaces"
+          echo "==================================="
+          kubectl get pods -A -o wide
+
+          echo ""
+          echo "==================================="
+          echo "Pods Not Running"
+          echo "==================================="
+          kubectl get pods -A --field-selector status.phase!=Running,status.phase!=Succeeded

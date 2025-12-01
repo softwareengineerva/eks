@@ -1,0 +1,122 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-exporter-queries
+  namespace: postgres
+data:
+  queries.yaml: |
+    # Database size metrics
+    pg_database:
+      query: |
+        SELECT
+          datname,
+          pg_database_size(datname) as size_bytes
+        FROM pg_database
+        WHERE datname NOT IN ('template0', 'template1')
+      metrics:
+        - datname:
+            usage: "LABEL"
+            description: "Database name"
+        - size_bytes:
+            usage: "GAUGE"
+            description: "Database size in bytes"
+
+    # Table size metrics
+    pg_table_size:
+      query: |
+        SELECT
+          schemaname,
+          tablename,
+          pg_total_relation_size(schemaname||'.'||tablename) as size_bytes
+        FROM pg_tables
+        WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
+        ORDER BY size_bytes DESC
+        LIMIT 20
+      metrics:
+        - schemaname:
+            usage: "LABEL"
+            description: "Schema name"
+        - tablename:
+            usage: "LABEL"
+            description: "Table name"
+        - size_bytes:
+            usage: "GAUGE"
+            description: "Table size in bytes"
+
+    # Connection statistics
+    pg_stat_database_connections:
+      query: |
+        SELECT
+          datname,
+          numbackends as connections
+        FROM pg_stat_database
+        WHERE datname IS NOT NULL
+      metrics:
+        - datname:
+            usage: "LABEL"
+            description: "Database name"
+        - connections:
+            usage: "GAUGE"
+            description: "Number of active connections"
+
+    # Transaction statistics
+    pg_stat_database_transactions:
+      query: |
+        SELECT
+          datname,
+          xact_commit as commits,
+          xact_rollback as rollbacks,
+          blks_read as blocks_read,
+          blks_hit as blocks_hit,
+          tup_returned as tuples_returned,
+          tup_fetched as tuples_fetched,
+          tup_inserted as tuples_inserted,
+          tup_updated as tuples_updated,
+          tup_deleted as tuples_deleted
+        FROM pg_stat_database
+        WHERE datname IS NOT NULL
+      metrics:
+        - datname:
+            usage: "LABEL"
+            description: "Database name"
+        - commits:
+            usage: "COUNTER"
+            description: "Number of committed transactions"
+        - rollbacks:
+            usage: "COUNTER"
+            description: "Number of rolled back transactions"
+        - blocks_read:
+            usage: "COUNTER"
+            description: "Number of disk blocks read"
+        - blocks_hit:
+            usage: "COUNTER"
+            description: "Number of buffer hits"
+        - tuples_returned:
+            usage: "COUNTER"
+            description: "Number of rows returned"
+        - tuples_fetched:
+            usage: "COUNTER"
+            description: "Number of rows fetched"
+        - tuples_inserted:
+            usage: "COUNTER"
+            description: "Number of rows inserted"
+        - tuples_updated:
+            usage: "COUNTER"
+            description: "Number of rows updated"
+        - tuples_deleted:
+            usage: "COUNTER"
+            description: "Number of rows deleted"
+
+    # Replication lag (if applicable)
+    pg_replication:
+      query: |
+        SELECT
+          CASE
+            WHEN pg_is_in_recovery() THEN
+              EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp()))
+            ELSE 0
+          END as lag_seconds
+      metrics:
+        - lag_seconds:
+            usage: "GAUGE"
+            description: "Replication lag in seconds"

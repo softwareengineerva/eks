@@ -1,0 +1,39 @@
+---
+# ClusterRole for Linkerd Tap access
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: linkerd-tap
+  labels:
+    app.kubernetes.io/name: linkerd-tap
+    app.kubernetes.io/part-of: linkerd
+rules:
+  - apiGroups: ["tap.linkerd.io"]
+    resources: ["*"]
+    verbs: ["watch"]
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list"]
+
+---
+# ClusterRoleBinding for current user
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: linkerd-tap-admin
+  labels:
+    app.kubernetes.io/name: linkerd-tap
+    app.kubernetes.io/part-of: linkerd
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: linkerd-tap
+subjects:
+  # Grant tap access to all authenticated users (adjust as needed)
+  - kind: Group
+    name: system:authenticated
+    apiGroup: rbac.authorization.k8s.io
+  # Grant tap access to cluster admins
+  - kind: Group
+    name: system:masters
+    apiGroup: rbac.authorization.k8s.io

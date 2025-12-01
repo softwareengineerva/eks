@@ -1,0 +1,61 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-config
+  namespace: secrets-demo
+data:
+  index.html: |
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Secrets Demo</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 40px; background-color: #f5f5f5; }
+            .container { background-color: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+            h1 { color: #2c3e50; }
+            .success { color: #27ae60; }
+            .info { color: #3498db; }
+            pre { background-color: #ecf0f1; padding: 15px; border-radius: 4px; overflow-x: auto; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🔐 AWS Secrets Manager Demo</h1>
+            <p class="success">✅ Secret successfully retrieved using IRSA and Secrets Store CSI Driver!</p>
+            <h2>Secret Content:</h2>
+            <pre id="secret-content">Loading...</pre>
+            <h2 class="info">How it works:</h2>
+            <ul>
+                <li>Pod uses ServiceAccount with IRSA annotation</li>
+                <li>Secrets Store CSI Driver mounts secret from AWS Secrets Manager</li>
+                <li>Secret is accessible as a file in /mnt/secrets-store</li>
+                <li>No AWS credentials stored in pod</li>
+            </ul>
+        </div>
+        <script>
+            fetch('/secret')
+                .then(response => response.text())
+                .then(data => {
+                    document.getElementById('secret-content').textContent = data;
+                })
+                .catch(error => {
+                    document.getElementById('secret-content').textContent = 'Error loading secret: ' + error;
+                });
+        </script>
+    </body>
+    </html>
+  nginx.conf: |
+    events {}
+    http {
+        server {
+            listen 80;
+            location / {
+                root /usr/share/nginx/html;
+                index index.html;
+            }
+            location /secret {
+                alias /mnt/secrets-store/concur-test-test-secret;
+                default_type text/plain;
+            }
+        }
+    }

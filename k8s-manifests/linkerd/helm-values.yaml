@@ -1,0 +1,41 @@
+# Linkerd Control Plane Helm Values
+# Deployed via ArgoCD for GitOps
+
+# Control plane configuration
+controllerReplicas: 2
+controllerResources:
+  cpu:
+    limit: "500m"
+    request: "100m"
+  memory:
+    limit: "512Mi"
+    request: "128Mi"
+
+# Proxy configuration defaults
+proxy:
+  resources:
+    cpu:
+      limit: "500m"
+      request: "100m"
+    memory:
+      limit: "256Mi"
+      request: "64Mi"
+
+# High availability
+controlPlaneTracing: false
+controlPlaneTracingNamespace: linkerd
+
+# Prometheus integration
+prometheusUrl: http://prometheus-stack-kube-prom-prometheus.monitoring.svc.cluster.local:9090
+
+# Dashboard configuration
+dashboard:
+  replicas: 1
+
+# Proxy injector
+proxyInjector:
+  externalSecret: false
+
+# Profile validator
+profileValidator:
+  externalSecret: false
